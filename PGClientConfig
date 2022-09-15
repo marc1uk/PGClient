@@ -1,0 +1,15 @@
+stopfile stop
+verbosity 5
+clt_pub_port 77778
+clt_dlr_port 77777
+clt_pub_socket_timeout 500
+clt_dlr_socket_timeout 500
+inpoll_timeout 500
+outpoll_timeout 500
+query_timeout 2000
+service_discovery_config ServiceDiscoveryConfig
+
+# unused for now
+max_retries 3
+resend_period_ms 1000
+print_stats_period_ms 5000;
