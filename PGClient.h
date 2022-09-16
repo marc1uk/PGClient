@@ -59,7 +59,7 @@ class PGClient {
 	bool TestMe();
 	
 	private:
-	DataModel* m_data;
+	DataModel* m_data = nullptr;
 	int clt_pub_port;
 	int clt_dlr_port;
 	

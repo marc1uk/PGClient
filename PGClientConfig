@@ -4,8 +4,8 @@ clt_pub_port 77778
 clt_dlr_port 77777
 clt_pub_socket_timeout 500
 clt_dlr_socket_timeout 500
-inpoll_timeout 500
-outpoll_timeout 500
+inpoll_timeout 50   # keep these short!
+outpoll_timeout 50  # keep these short!
 query_timeout 2000
 service_discovery_config ServiceDiscoveryConfig
 

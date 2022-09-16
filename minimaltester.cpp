@@ -1,6 +1,8 @@
 #include "PGHelper.h"
 #include "Store.h"
 #include "DataModel.h"
+#include <thread>
+#include <chrono>
 
 int main(int argc, const char** argv){
 	
@@ -27,28 +29,39 @@ int main(int argc, const char** argv){
 	
 	PGClient theclient;
 	get_ok = theclient.Initialise(argv[1]);
-	if(not get_ok) return false;
+	if(not get_ok){
+		theclient.Finalise();
+		return false;
+	}
+	// wait to allow the ServiceDiscovery to connect
+	std::cout<<"sleeping to allow middleman to find us and connect"<<std::endl;
+	std::this_thread::sleep_for(std::chrono::seconds(15));
+	std::cout<<"waking back up"<<std::endl;
 	
 	int loopi=0;
-	while(true){
+	while(loopi<20){
 		
 		++loopi;
 		
 		// run a read query
 		std::vector<std::string> results;
 		std::string err;
-		std::string dbname="rundb";
-		std::string query_string = "SELECT max(runnum) FROM run";
-		int this_timeout = 100;
+		std::string dbname="monitoringdb";
+		//std::string query_string = "SELECT max(runnum) FROM run";
+		std::string query_string = "SELECT * FROM resources LIMIT 1";
+		int this_timeout = 1000;
 		std::cout<<"submitting read query"<<std::endl;
 		get_ok = theclient.SendQuery(dbname, query_string, &results, &this_timeout, &err);
-		std::cout<<"read query "<<loopi<<" returned "<<get_ok<<", err='"<<err<<"'"<<", results='";
-		for(int i=0; i<results.size(); ++i){
-			if(i>0) std::cout<<", ";
-			std::cout<<results.at(i);
+		if(get_ok){
+			std::cout<<"read query "<<loopi<<" returned "<<get_ok<<", err='"<<err<<"'"<<", results='";
+			for(int i=0; i<results.size(); ++i){
+				if(i>0) std::cout<<", ";
+				std::cout<<results.at(i);
+			}
+			std::cout<<"'"<<std::endl;
 		}
-		std::cout<<"'"<<std::endl;
 		
+		/*
 		// run a write query
 		dbname="monitoringdb";
 		query_string = "INSERT INTO logging ( time, source, severity, message ) VALUES ( 'now()', 'debug', 99, 'testing pgclient " + std::to_string(loopi)+"' );";
@@ -61,6 +74,7 @@ int main(int argc, const char** argv){
 			std::cout<<results.at(i);
 		}
 		std::cout<<"'"<<std::endl;
+		*/
 		
 		// check for stop file
 		std::ifstream stopfile(stop_file);
@@ -72,7 +86,7 @@ int main(int argc, const char** argv){
 			break;
 		}
 		
-		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 	}
 	
 	theclient.Finalise();

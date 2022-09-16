@@ -38,12 +38,12 @@ bool PGClient::Initialise(std::string configfile){
 	m_variables.Get("verbosity",verbosity);
 	m_variables.Get("max_retries",max_retries);
 	
+	get_ok = InitLogging();
 	get_ok = InitZMQ();
 	if(not get_ok) return false;
-	
-	get_ok = InitLogging();
-	get_ok = InitServiceDiscovery();
-	get_ok = RegisterServices();
+	get_ok &= InitServiceDiscovery();
+	get_ok &= RegisterServices();
+	if(not get_ok) return false;
 	
 	/*                Time Tracking              */
 	/* ----------------------------------------- */
@@ -76,21 +76,6 @@ bool PGClient::Initialise(std::string configfile){
 	} else {
 		hostname = std::string(buf);
 	}
-	
-	// to send replies the middleman must know who to send them to.
-	// for read queries, the receiving router socket will append the ZMQ_IDENTITY of the sender
-	// which can be given to the sending router socket to identify the recipient.
-	// BUT the default ZMQ_IDENTITY of a socket is empty! We must set it ourselves to be useful!
-	// for write queries we ALSO need to manually insert the ZMQ_IDENTITY into the written message,
-	// because the receiving sub socket does not do this automaticaly.
-	
-	// using 'getsockopt(ZMQ_IDENTITY)' without setting it first produces an empty string,
-	// so seems to need to set it manually to be able to know what the ID is, and
-	// insert it into the write queries.
-	// FIXME replace with whatever ben wants?
-	boost::uuids::uuid u = boost::uuids::random_generator()();
-	clt_ID = boost::uuids::to_string(u);
-	clt_ID += '\0';
 	
 	// kick off a thread to do actual send and receive of messages
 	std::future<void> signal = terminator.get_future();
@@ -130,6 +115,21 @@ bool PGClient::InitZMQ(){
 	m_variables.Get("inpoll_timeout",inpoll_timeout);
 	m_variables.Get("outpoll_timeout",outpoll_timeout);
 	m_variables.Get("query_timeout",query_timeout);
+	
+	// to send replies the middleman must know who to send them to.
+	// for read queries, the receiving router socket will append the ZMQ_IDENTITY of the sender
+	// which can be given to the sending router socket to identify the recipient.
+	// BUT the default ZMQ_IDENTITY of a socket is empty! We must set it ourselves to be useful!
+	// for write queries we ALSO need to manually insert the ZMQ_IDENTITY into the written message,
+	// because the receiving sub socket does not do this automaticaly.
+	
+	// using 'getsockopt(ZMQ_IDENTITY)' without setting it first produces an empty string,
+	// so seems to need to set it manually to be able to know what the ID is, and
+	// insert it into the write queries.
+	// FIXME replace with whatever ben wants?
+	boost::uuids::uuid u = boost::uuids::random_generator()();
+	clt_ID = boost::uuids::to_string(u);
+	clt_ID += '\0';
 	
 	// get zmq context from datamodel, or make one if none
 	if(m_data!=nullptr && m_data->context!=nullptr){
@@ -173,9 +173,11 @@ bool PGClient::InitServiceDiscovery(){
 	std::string sda;
 	if(m_data!=nullptr && m_data->vars.Get("service_discovery_address",sda)==true){
 		// probably running as part of a toolchain
+		Log("Seem to be part of a toolchain; assuming ServiceDiscovery is running",v_message,verbosity);
 		return true;
 	}
 	// otherwise assume we have to start one of our own
+	Log("Creating ServiceDiscovery thread",v_message,verbosity);
 	
 	/*               Service Discovery           */
 	/* ----------------------------------------- */
@@ -277,6 +279,7 @@ bool PGClient::TestMe(){
 
 bool PGClient::BackgroundThread(std::future<void> signaller){
 	
+	std::cout<<"BackgroundThread starting!"<<std::endl;
 	while(true){
 		// check if we've been signalled to terminate
 		std::chrono::milliseconds span(10);
@@ -289,7 +292,7 @@ bool PGClient::BackgroundThread(std::future<void> signaller){
 		// otherwise continue our duties
 		get_ok = GetNextRespose();
 		get_ok = SendNextQuery();
-		get_ok = FindNewClients();
+		//get_ok = FindNewClients();     FOR MIDDLEMAN ONLY
 	}
 	
 	return true;
@@ -314,13 +317,13 @@ bool PGClient::SendQuery(std::string dbname, std::string query_string, std::vect
 	// submit the query asynchrously.
 	// This way we have control over how long we wait for the response
 	// The response will be a Query object with remaining members populated.
-	std::future<Query> response = std::async(&PGClient::DoQuery, this, qry);
+	std::future<Query> response = std::async(std::launch::async, &PGClient::DoQuery, this, qry);
 	
 	// the return from a std::async call is a 'future' object
 	// this object will be populated with the return value when it becomes available,
 	// but we can wait for a given timeout and then bail if it hasn't resolved in time.
 	
-	int timeout=query_timeout;         // default timeout for submission of query and receipt of response
+	int timeout=query_timeout;              // default timeout for submission of query and receipt of response
 	if(timeout_ms) timeout=*timeout_ms;     // override by user if a custom timeout is given
 	std::chrono::milliseconds span(timeout);
 	// wait_for will return either when the result is ready, or when it times out
@@ -332,7 +335,7 @@ bool PGClient::SendQuery(std::string dbname, std::string query_string, std::vect
 		return qry.success;
 	} else {
 		// timed out
-		std::string errmsg="Timed out after  waiting "+std::to_string(timeout)+"ms for response "
+		std::string errmsg="Timed out after waiting "+std::to_string(timeout)+"ms for response "
 		                   "from read query '"+query_string+"'";
 		if(verbosity>3) std::cerr<<errmsg<<std::endl;
 		if(err) *err=errmsg;
@@ -357,6 +360,7 @@ bool PGClient::SendQuery(std::string dbname, std::string query_string, std::stri
 }
 
 Query PGClient::DoQuery(Query qry){
+	std::cout<<"PGClient DoQuery received query"<<std::endl;
 	// submit a query, wait for the response and return it
 	
 	// capture a unique id for this message
@@ -367,6 +371,7 @@ Query PGClient::DoQuery(Query qry){
 	// submit our query and keep a ticket to retrieve the return status on completion
 	std::promise<int> send_ticket;
 	std::future<int> send_receipt = send_ticket.get_future();
+	std::cout<<"PGClient enqueing query "<<qry.msg_id<<std::endl;
 	waiting_senders.emplace(qry, std::move(send_ticket));
 	
 	// wait for our number to come up. loooong timeout, but don't hang forever.
@@ -413,6 +418,7 @@ Query PGClient::DoQuery(Query qry){
 		qry.err = "Timed out waiting for response";
 		return qry;
 	} else {
+		std::cout<<"PGClient got a response for query "<<qry.msg_id<<std::endl;
 		// got a response!
 		return response_reciept.get();
 	}
@@ -426,6 +432,7 @@ bool PGClient::GetNextRespose(){
 	
 	std::vector<zmq::message_t> response;
 	int ret = PollAndReceive(clt_dlr_socket, in_polls.at(0), inpoll_timeout, response);
+	//std::cout<<"PGClient: GNR returned "<<ret<<std::endl;
 	
 	// check return status
 	if(ret==-2) return true;      // no messages waiting to be received
@@ -467,7 +474,7 @@ bool PGClient::GetNextRespose(){
 		qry.success = *reinterpret_cast<int*>(response.at(1).data());  // (0 or 1 for now)
 	}
 	// if we also had further parts, fetch those
-	for(int i=3; i<response.size(); ++i){
+	for(int i=2; i<response.size(); ++i){
 		qry.query_response.push_back(std::string(reinterpret_cast<const char*>(response.at(i).data())));
 	}
 	
@@ -497,6 +504,7 @@ bool PGClient::SendNextQuery(){
 	// get the next query to send
 	std::pair<Query, std::promise<int>>& next_qry = waiting_senders.front();
 	Query qry = next_qry.first;
+	std::cout<<"PGClient: sending query "<<qry.msg_id<<std::endl;
 	
 	// write queries go to the pub socket, read queries to the dealer
 	zmq::socket_t* thesocket = (qry.type=='w') ? clt_pub_socket : clt_dlr_socket;
@@ -508,6 +516,7 @@ bool PGClient::SendNextQuery(){
 	// 3. database name
 	// 4. SQL statement
 	int ret = PollAndSend(thesocket, out_polls.at(1), outpoll_timeout, qry.msg_id, qry.dbname, qry.query_string);
+	std::cout<<"PGClient SNQ P&S returned "<<ret<<std::endl;
 	
 	// notify the client that the message has been sent
 	std::promise<int>* ticket = &next_qry.second;
@@ -549,7 +558,8 @@ bool PGClient::Finalise(){
 	// same with logging
 	if(m_data==nullptr || m_data->Log==nullptr) delete m_log; m_log=nullptr;
 	
-	Log("PGClient destructor done",v_message,verbosity);
+	// can't use 'Log' since we may have deleted the Logging class
+	std::cout<<"PGClient destructor done"<<std::endl;
 }
 
 // =====================================================================
@@ -592,8 +602,8 @@ bool PGClient::Send(zmq::socket_t* sock, bool more, zmq::message_t& message){
 
 bool PGClient::Send(zmq::socket_t* sock, bool more, std::string messagedata){
 	// form the zmq::message_t
-	zmq::message_t message(messagedata.size());
-	memcpy(message.data(), messagedata.data(), messagedata.size());
+	zmq::message_t message(messagedata.size()+1);
+	snprintf((char*)message.data(), messagedata.size()+1, "%s", messagedata.c_str());
 	
 	// send it with given SNDMORE flag
 	bool send_ok;
@@ -610,8 +620,8 @@ bool PGClient::Send(zmq::socket_t* sock, bool more, std::vector<std::string> mes
 	for(int i=0; i<(messages.size()-1); ++i){
 		
 		// form zmq::message_t
-		zmq::message_t message(messages.at(i).size());
-		memcpy(message.data(), messages.at(i).data(), messages.at(i).size());
+		zmq::message_t message(messages.at(i).size()+1);
+		snprintf((char*)message.data(), messages.at(i).size()+1, "%s", messages.at(i).c_str());
 		
 		// send this part
 		bool send_ok = sock->send(message, ZMQ_SNDMORE);
@@ -621,8 +631,8 @@ bool PGClient::Send(zmq::socket_t* sock, bool more, std::vector<std::string> mes
 	}
 	
 	// form the zmq::message_t for the last part
-	zmq::message_t message(messages.back().size());
-	memcpy(message.data(), messages.back().data(), messages.back().size());
+	zmq::message_t message(messages.back().size()+1);
+	snprintf((char*)message.data(), messages.back().size()+1, "%s", messages.back().c_str());
 	
 	// send it with, or without SNDMORE flag as requested
 	bool send_ok;
